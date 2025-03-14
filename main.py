@@ -241,7 +241,7 @@ for epoch in tqdm(range(EPOCHS), desc="Training epochs"):
     tqdm.write(f"Epoch [{epoch+1}/{EPOCHS}] | D Loss: {avg_d_loss:.4f} | G Loss: {avg_g_loss:.4f}")
 
 # 图生成示例
-def generate_graph(generator, num_graphs=1):
+def generate_graph(generator, num_graphs=10):
     z = torch.randn(num_graphs, LATENT_DIM, device=device)
     with torch.no_grad():
         nodes, adj = generator(z)
