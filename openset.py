@@ -178,6 +178,8 @@ def train(model_G, model_C, dataloader, num_known_classes, device,
     
     model_G.train()
     model_C.train()
+
+    torch.autograd.set_detect_anomaly(True)
     
     for epoch in range(num_epochs):
         total_loss_C = 0.0

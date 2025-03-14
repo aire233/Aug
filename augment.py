@@ -251,12 +251,22 @@ else:
     print("Training already completed based on the saved checkpoint.")
 
 # -------------------- 生成图示例 --------------------
-def generate_graph(generator, num_graphs=10):
+def generate_graph(generator, num_graphs=1):
     z = torch.randn(num_graphs, LATENT_DIM, device=device)
     with torch.no_grad():
-        nodes, adj = generator(z)
-    # 转换为 PyG Batch 对象后可直接传入判别器或后续处理
-    return nodes.cpu(), adj.cpu()
+        nodes, adj_matrices = generator(z)
+    for i, adj in enumerate(adj_matrices.cpu().numpy()):  # 转换为 numpy 数组
+        filename = f"generated_graph/generated_graph_{i}.txt"      
+        with open(filename, "w") as w:
+            num_nodes = adj.shape[0]
+            for u in range(num_nodes):
+                for v in range(num_nodes):
+                    if adj[u, v] > 0:  # 只存储存在的边
+                        w.write(f"{u} {v}\n")
+                        w.write(f"{v} {u}\n")
+        print(f"Graph {i} saved to {filename}")
+    return nodes.cpu(), adj_matrices.cpu()
 
 generated_nodes, generated_adj = generate_graph(generator)
-print("Generated adjacency matrix example:", generated_adj[0])
+# print("Generated adjacency matrix example:", generated_adj[0])
+
