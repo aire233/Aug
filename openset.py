@@ -3,87 +3,103 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import torch.nn.functional as F
-from tqdm import tqdm
+from torch.utils.data import Dataset, DataLoader
 
 
-#############################
-# 数据加载与预处理
-#############################
-class GraphDataset(torch.utils.data.Dataset):
+# -------------------------------
+# 数据加载部分
+# -------------------------------
+def load_txt(file_path, dtype=int):
+    with open(file_path, "r") as f:
+        lines = f.readlines()
+    return np.array([dtype(line.strip()) for line in lines])
+
+
+def one_hot_encode(labels, num_classes):
+    return np.eye(num_classes)[labels]
+
+
+class GraphDataset(Dataset):
     """
-    加载图数据，要求文件放在 folder_path 下，文件名格式为：
-       DS_A.txt, DS_graph_indicator.txt, DS_graph_labels.txt, DS_node_labels.txt
+    根据提供的 DS_A.txt, DS_graph_indicator.txt, DS_node_labels.txt, DS_graph_labels.txt 构造图数据集。
+    每个样本为一个图，包含：
+      - X: 节点特征矩阵 (num_nodes x feature_dim)，采用 one-hot 编码（这里 feature_dim=65）
+      - A: 邻接矩阵 (num_nodes x num_nodes)，已进行归一化处理（加入自环并归一化）
+      - label: 图标签（整数，从 0 到 K-1）
     """
 
-    def __init__(self, folder_path, ds_prefix):
-        super(GraphDataset, self).__init__()
-        self.folder_path = folder_path
-        self.ds_prefix = ds_prefix
+    def __init__(self, data_dir, ds_prefix):
+        # 文件路径
+        path_A = os.path.join(data_dir, f"{ds_prefix}_A.txt")
+        path_indicator = os.path.join(data_dir, f"{ds_prefix}_graph_indicator.txt")
+        path_node_labels = os.path.join(data_dir, f"{ds_prefix}_node_labels.txt")
+        path_graph_labels = os.path.join(data_dir, f"{ds_prefix}_graph_labels.txt")
 
-        # 加载各文件（请根据实际文件格式调整 delimiter）
-        self.edges = np.loadtxt(
-            os.path.join(folder_path, f"{ds_prefix}_A.txt"), delimiter=",", dtype=int
-        )
-        self.graph_indicator = np.loadtxt(
-            os.path.join(folder_path, f"{ds_prefix}_graph_indicator.txt"),
-            delimiter=",",
-            dtype=int,
-        )
-        self.graph_labels = np.loadtxt(
-            os.path.join(folder_path, f"{ds_prefix}_graph_labels.txt"),
-            delimiter=",",
-            dtype=int,
-        )
-        self.node_labels = np.loadtxt(
-            os.path.join(folder_path, f"{ds_prefix}_node_labels.txt"),
-            delimiter=",",
-            dtype=int,
-        )
+        # 读取数据
+        # DS_graph_indicator.txt：每行给出节点所属图的 id（注意文件中图 id 从 1 开始）
+        graph_indicator = load_txt(path_indicator, dtype=int)
+        # DS_node_labels.txt：每行是节点标签（这里标签已经转换为整数，取值范围 0~64）
+        node_labels = load_txt(path_node_labels, dtype=int)
+        # DS_graph_labels.txt：每行是图的类别标签（图 id 顺序）
+        graph_labels = load_txt(path_graph_labels, dtype=int)
+        # DS_A.txt：每行表示边 (node_i, node_j)，节点 id 从 1 开始
+        edges = []
+        with open(path_A, "r") as f:
+            for line in f:
+                src, dst = line.strip().split(',')
+                edges.append((int(src) - 1, int(dst) - 1))  # 转换为 0-based
 
-        # 构建图ID到节点索引的映射
-        self.graph2node = {}
-        for i, g_id in enumerate(self.graph_indicator):
-            self.graph2node.setdefault(g_id, []).append(i)
-
-        # 对节点标签进行 one-hot 编码（编码维度为最大标签值+1）
-        num_node_labels = int(self.node_labels.max()) + 1
-        node_features = F.one_hot(
-            torch.tensor(self.node_labels, dtype=torch.long),
-            num_classes=num_node_labels,
-        ).float()
-
-        # 预先将全局边分组到对应的图中，减少后续每个图中遍历所有边的时间开销
-        graph_edges = {}
-        for edge in self.edges:
-            # 注意：文件中节点编号从1开始
-            i, j = edge[0] - 1, edge[1] - 1
-            # 利用 graph_indicator 获取节点所属图（假定边的两个端点属于同一图）
-            g_id = self.graph_indicator[i]
-            # 如果有异常情况，也可以加判断： if self.graph_indicator[i] != self.graph_indicator[j]: continue
-            graph_edges.setdefault(g_id, []).append((i, j))
-
-        # 构造每个图的数据
+        # 构建图数据。假设图的编号是连续的，从 1 到 N
+        unique_graph_ids = np.unique(graph_indicator)
         self.graphs = []
-        for g_id in tqdm(
-            sorted(self.graph2node.keys()), desc="Constructing graph data"
-        ):
-            nodes = self.graph2node[g_id]
-            x = node_features[nodes]  # 节点特征矩阵
-            num_nodes = x.shape[0]
-            # 初始化邻接矩阵（无自环）
-            adj = np.zeros((num_nodes, num_nodes), dtype=np.float32)
-            # 构建全局节点id到局部索引的映射
-            nodeid2local = {
-                global_id: local_id for local_id, global_id in enumerate(nodes)
-            }
-            # 仅遍历属于当前图的边
-            for i, j in graph_edges.get(g_id, []):
-                li, lj = nodeid2local[i], nodeid2local[j]
-                adj[li, lj] = 1.0
-                adj[lj, li] = 1.0  # 无向图，确保对称
-            label = int(self.graph_labels[g_id - 1])
-            self.graphs.append({"x": x, "adj": torch.tensor(adj), "label": label})
+        # 建立节点 id 到所属图 id 的映射
+        node2graph = graph_indicator  # 长度为 n，每个元素是图 id
+
+        # 预先将所有边按所属图划分（由于 DS_A.txt 为 block diagonal, 边只存在于同一图中）
+        graph_edges = {gid: [] for gid in unique_graph_ids}
+        for src, dst in edges:
+            gid = node2graph[src]  # 两个节点属于同一图
+            graph_edges[gid].append((src, dst))
+
+        # 按图构造数据（注意：由于各图节点在整体中可能是非连续的，我们需要映射到局部索引）
+        for gid in unique_graph_ids:
+            # 找出属于该图的全局节点 id 列表
+            global_node_ids = np.where(node2graph == gid)[0]
+            num_nodes = len(global_node_ids)
+            # 构造节点特征：利用节点标签进行 one-hot 编码
+            # 假设节点标签的取值范围 0~64，共65类
+            node_feats = one_hot_encode(node_labels[global_node_ids], num_classes=65)
+            # 构造邻接矩阵（先构造稀疏矩阵，再转为 dense）
+            A = np.zeros((num_nodes, num_nodes), dtype=np.float32)
+            # 建立全局到局部索引映射
+            global2local = {g: i for i, g in enumerate(global_node_ids)}
+            # 取出边：只保留该图内部的边
+            for src, dst in graph_edges[gid]:
+                if src in global2local and dst in global2local:
+                    i, j = global2local[src], global2local[dst]
+                    A[i, j] = 1.0
+                    A[j, i] = 1.0  # 无向图
+            # 添加自环并归一化邻接矩阵（简化的对称归一化）
+            A = A + np.eye(num_nodes, dtype=np.float32)
+            D = np.sum(A, axis=1)
+            D_inv_sqrt = np.diag(1.0 / np.sqrt(D))
+            A_norm = D_inv_sqrt @ A @ D_inv_sqrt
+
+            # 图标签（注意：graph_labels 文件中行号与 gid 对应，且 gid 从 1 开始）
+            # 我们将图标签转换为从 0 开始
+            graph_label = int(graph_labels[gid - 1])
+            self.graphs.append(
+                {
+                    "X": torch.tensor(node_feats, dtype=torch.float),
+                    "A": torch.tensor(A_norm, dtype=torch.float),
+                    "label": torch.tensor(graph_label, dtype=torch.long),
+                }
+            )
+
+        # 得到已知类别数量 K（开放类别为 K）
+        self.known_labels = sorted(list({g["label"].item() for g in self.graphs}))
+        self.num_known = len(self.known_labels)
+        print(f"Loaded {len(self.graphs)} graphs, {self.num_known} known classes.")
 
     def __len__(self):
         return len(self.graphs)
@@ -92,260 +108,143 @@ class GraphDataset(torch.utils.data.Dataset):
         return self.graphs[idx]
 
 
-def collate_fn(batch):
-    # 由于每个图大小不同，这里直接返回图列表，后续在模型中单独处理
-    return batch
-
-
-#############################
-# 模型定义：GCN层、生成器G与分类器C
-#############################
+# -------------------------------
+# 模型定义部分
+# -------------------------------
 class GCNLayer(nn.Module):
-    def __init__(self, in_features, out_features, dropout=0.0):
+    def __init__(self, in_features, out_features):
         super(GCNLayer, self).__init__()
         self.linear = nn.Linear(in_features, out_features)
-        self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x, adj):
-        # 添加自环
-        I = torch.eye(adj.size(0), device=adj.device)
-        A_hat = adj + I
-        # 计算 D^(-1/2)
-        D = torch.sum(A_hat, dim=1)
-        D_inv_sqrt = torch.diag(torch.pow(D, -0.5))
-        # 归一化邻接矩阵
-        A_norm = D_inv_sqrt @ A_hat @ D_inv_sqrt
-        out = A_norm @ x
+    def forward(self, X, A):
+        # 简单实现：先做邻接矩阵乘法，再线性变换
+        out = torch.matmul(A, X)
         out = self.linear(out)
-        out = self.dropout(out)
         return out
 
 
 class GraphFeatureExtractor(nn.Module):
     """
-    特征生成网络 G：两层 GCN + ReLU 激活 + 全局均值池化得到图级特征
+    特征生成网络 G：
+      - 两层图卷积
+      - 节点特征池化（均值池化）得到图级表示
+      - 提供噪声接口，用于生成对抗样本（在图级特征上加噪声）
     """
 
-    def __init__(self, in_features, hidden_dim, out_dim, dropout=0.0):
+    def __init__(self, in_features=65, hidden_dim=128, out_dim=128):
         super(GraphFeatureExtractor, self).__init__()
-        self.gcn1 = GCNLayer(in_features, hidden_dim, dropout)
-        self.gcn2 = GCNLayer(hidden_dim, out_dim, dropout)
+        self.conv1 = GCNLayer(in_features, hidden_dim)
+        self.conv2 = GCNLayer(hidden_dim, out_dim)
+        self.relu = nn.ReLU()
 
-    def forward(self, x, adj):
-        out = F.relu(self.gcn1(x, adj))
-        out = self.gcn2(out, adj)
-        graph_feature = torch.mean(out, dim=0)  # 全局均值池化
-        return graph_feature
+    def forward(self, X, A, noise=None):
+        x = self.conv1(X, A)
+        x = self.relu(x)
+        x = self.conv2(x, A)
+        x = self.relu(x)
+        # 节点池化（均值池化），得到图级表示：尺寸 (1, out_dim)
+        graph_feat = torch.mean(x, dim=0, keepdim=True)
+        if noise is not None:
+            graph_feat = graph_feat + noise
+        return graph_feat
 
 
 class Classifier(nn.Module):
     """
-    分类器 C：简单的 MLP，输出 K+1 维概率（最后一维为未知类）
+    分类器网络 C：简单 MLP，输出 (K+1) 维 logits，
+    前 K 维为已知类别，最后一维为开放类别。
     """
 
-    def __init__(self, in_dim, hidden_dim, num_known_classes, dropout=0.0):
+    def __init__(self, in_dim=128, hidden_dim=64, num_classes=7):
         super(Classifier, self).__init__()
         self.fc1 = nn.Linear(in_dim, hidden_dim)
-        self.dropout = nn.Dropout(dropout)
-        self.fc2 = nn.Linear(hidden_dim, num_known_classes + 1)  # +1 表示未知类
+        self.relu = nn.ReLU()
+        self.fc2 = nn.Linear(hidden_dim, num_classes)
 
     def forward(self, x):
-        x = F.relu(self.fc1(x))
-        x = self.dropout(x)
+        x = self.fc1(x)
+        x = self.relu(x)
         logits = self.fc2(x)
         return logits
 
 
-#############################
-# 对抗样本生成函数
-#############################
-def generate_adversarial_feature_for_classifier(f, classifier, epsilon, device):
-    """
-    针对分类器更新：输入 f 已 detach，梯度只作用于分类器参数。
-    """
-    f_adv = f.clone().detach().to(device)
-    f_adv.requires_grad = True
-    # 目标为未知类，其索引为 classifier.fc2.out_features - 1
-    target = torch.tensor(
-        [classifier.fc2.out_features - 1], dtype=torch.long, device=device
-    )
-    logits = classifier(f_adv)
-    loss = F.cross_entropy(logits.unsqueeze(0), target)
-    grad = torch.autograd.grad(loss, f_adv)[0]
-    f_adv = f_adv + epsilon * torch.sign(grad)
-    return f_adv.detach()  # 返回时 detach
-
-
-def generate_adversarial_feature_for_generator(f, classifier, epsilon, device):
-    """
-    针对生成器更新：冻结分类器参数，使梯度只传递给 f，
-    使用 create_graph=True 构造二阶梯度，确保计算图完整。
-    """
-    # 暂时冻结分类器参数
-    classifier_params = list(classifier.parameters())
-    orig_grad = [p.requires_grad for p in classifier_params]
-    for p in classifier_params:
-        p.requires_grad = False
-
-    target = torch.tensor(
-        [classifier.fc2.out_features - 1], dtype=torch.long, device=device
-    )
-    logits = classifier(f)
-    loss = F.cross_entropy(logits.unsqueeze(0), target)
-    # 这里使用 create_graph=True 构造二阶梯度
-    grad = torch.autograd.grad(loss, f, create_graph=True)[0]
-    f_adv = f + epsilon * torch.sign(grad)
-
-    # 恢复分类器参数状态
-    for p, req in zip(classifier_params, orig_grad):
-        p.requires_grad = req
-    return f_adv
-
-
-#############################
-# 交替训练过程
-#############################
-def train(
-    model_G,
-    model_C,
-    dataloader,
-    num_known_classes,
-    device,
-    num_epochs=50,
-    epsilon=0.1,
-    lambda_adv=1.0,
-    lr=1e-3,
-):
-    optimizer_G = optim.Adam(model_G.parameters(), lr=lr)
-    optimizer_C = optim.Adam(model_C.parameters(), lr=lr)
-
-    model_G.train()
-    model_C.train()
-
-    torch.autograd.set_detect_anomaly(True)
-
-    for epoch in range(num_epochs):
-        total_loss_C = 0.0
-        total_loss_G = 0.0
-
-        for batch in dataloader:
-            loss_C_list = []
-            loss_G_list = []
-            for data in batch:
-                x = data["x"].to(device)  # 节点特征
-                adj = data["adj"].to(device)  # 邻接矩阵
-                true_label = torch.tensor(
-                    [data["label"]], dtype=torch.long, device=device
-                )
-
-                # ===== 分类器更新 =====
-                with torch.no_grad():
-                    f = model_G(x, adj)
-                f_detached = f.detach()
-                logits_real = model_C(f_detached)
-                loss_cls = F.cross_entropy(logits_real.unsqueeze(0), true_label)
-
-                f_adv_cls = generate_adversarial_feature_for_classifier(
-                    f_detached, model_C, epsilon, device
-                )
-                logits_adv = model_C(f_adv_cls)
-                target_unknown = torch.tensor(
-                    [num_known_classes], dtype=torch.long, device=device
-                )
-                loss_adv = F.cross_entropy(logits_adv.unsqueeze(0), target_unknown)
-                loss_C = loss_cls + lambda_adv * loss_adv
-                loss_C_list.append(loss_C)
-
-                # ===== 生成器更新 =====
-                f = model_G(x, adj)  # 重新计算 f，保留梯度
-                f_adv_gen = generate_adversarial_feature_for_generator(
-                    f, model_C, epsilon, device
-                )
-                logits_real_gen = model_C(f)
-                loss_cls_gen = F.cross_entropy(logits_real_gen.unsqueeze(0), true_label)
-                logits_adv_gen = model_C(f_adv_gen)
-                loss_adv_gen = F.cross_entropy(
-                    logits_adv_gen.unsqueeze(0), target_unknown
-                )
-                loss_G = loss_cls_gen - lambda_adv * loss_adv_gen
-                loss_G_list.append(loss_G)
-
-            loss_C_batch = sum(loss_C_list)
-            loss_G_batch = sum(loss_G_list)
-
-            optimizer_C.zero_grad()
-            loss_C_batch.backward(retain_graph=True)
-            optimizer_C.step()
-
-            optimizer_G.zero_grad()
-            loss_G_batch.backward()
-            optimizer_G.step()
-
-            total_loss_C += loss_C_batch.item()
-            total_loss_G += loss_G_batch.item()
-
-        print(
-            f"Epoch {epoch+1}/{num_epochs}, Loss_C: {total_loss_C:.4f}, Loss_G: {total_loss_G:.4f}"
-        )
-
-
-#############################
-# 主函数
-#############################
-def main():
-    # 参数设置，根据实际情况调整
-    folder_path = "./SW-620"  # 数据文件所在目录
-    ds_prefix = "SW-620"  # 数据集前缀，例如 DS
-    num_known_classes = 2  # 假设已知类别编号为 0 ~ num_known_classes-1，请根据数据调整
-    in_feature_dim = 65  # 节点特征维度（依据 DS_node_labels 的映射，通常为标签最大值+1）
-    hidden_dim_G = 32
-    out_dim_G = 32  # 图级特征维度
-    hidden_dim_C = 32
-    num_epochs = 100
-    epsilon = 0.1
-    lambda_adv = 1.0
-    lr = 1e-3
-    dropout_rate = 0.5  # dropout 概率，可根据需要调整
+# -------------------------------
+# 训练过程
+# -------------------------------
+def train(data_dir, ds_prefix, num_epochs=100, lr=1e-3, noise_std=0.1, lambda_adv=1.0):
+    # 加载数据
+    dataset = GraphDataset(data_dir, ds_prefix)
+    dataloader = DataLoader(dataset, batch_size=1, shuffle=True)  # 每次一个图
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # 加载数据集
-    dataset = GraphDataset(folder_path, ds_prefix)
-    dataloader = torch.utils.data.DataLoader(
-        dataset, batch_size=1, shuffle=True, collate_fn=collate_fn
-    )
+    # 模型：注意分类器输出维度 = num_known + 1（开放类别）
+    G_model = GraphFeatureExtractor().to(device)
+    C_model = Classifier(num_classes=dataset.num_known + 1).to(device)
 
-    # 模型初始化
-    model_G = GraphFeatureExtractor(
-        in_features=in_feature_dim,
-        hidden_dim=hidden_dim_G,
-        out_dim=out_dim_G,
-        dropout=dropout_rate,
-    ).to(device)
-    model_C = Classifier(
-        in_dim=out_dim_G,
-        hidden_dim=hidden_dim_C,
-        num_known_classes=num_known_classes,
-        dropout=dropout_rate,
-    ).to(device)
+    optimizer_G = optim.Adam(G_model.parameters(), lr=lr)
+    optimizer_C = optim.Adam(C_model.parameters(), lr=lr)
+    criterion = nn.CrossEntropyLoss()
 
-    # 训练
-    train(
-        model_G,
-        model_C,
-        dataloader,
-        num_known_classes,
-        device,
-        num_epochs=num_epochs,
-        epsilon=epsilon,
-        lambda_adv=lambda_adv,
-        lr=lr,
-    )
+    for epoch in range(num_epochs):
+        G_model.train()
+        C_model.train()
+        total_loss_C = 0.0
+        total_loss_G = 0.0
+        for data in dataloader:
+            X, A, label = (
+                data["X"].to(device),
+                data["A"].to(device),
+                data["label"].to(device),
+            )
+            # data["X"]: (num_nodes, feature_dim)
+            # data["A"]: (num_nodes, num_nodes)
+            # label: (1,) 整数，取值范围 0~K-1
 
-    # 训练结束后保存模型或进一步评估
-    torch.save(model_G.state_dict(), "model_G.pth")
-    torch.save(model_C.state_dict(), "model_C.pth")
+            # 计算真实图特征
+            f_real = G_model(X, A)  # shape: (1, feature_dim)
+            logits_real = C_model(f_real)
+            loss_real = criterion(logits_real, label)
+
+            # 生成对抗样本：在图级特征上加入噪声
+            noise = torch.randn_like(f_real) * noise_std
+            f_fake = G_model(X, A, noise=noise)
+            logits_fake = C_model(f_fake)
+            # 对于生成样本，分类器的目标是判断为开放类别（标签为 num_known）
+            open_target = torch.full(
+                (label.size(0),), dataset.num_known, dtype=torch.long, device=device
+            )
+            loss_fake = criterion(logits_fake, open_target)
+
+            # 更新分类器 C
+            optimizer_C.zero_grad()
+            loss_C = loss_real + loss_fake
+            loss_C.backward()
+            optimizer_C.step()
+
+            # 更新特征生成网络 G 对抗性部分：
+            # 目标：使得经过加噪声后的 f_fake 被判为真实类别 label（欺骗分类器）
+            optimizer_G.zero_grad()
+            noise = torch.randn_like(f_real) * noise_std
+            f_fake = G_model(X, A, noise=noise)
+            logits_fake_forG = C_model(f_fake)
+            loss_G_adv = criterion(logits_fake_forG, label)
+            # 同时对真实样本保持判别能力（监督损失）
+            loss_G_sup = criterion(C_model(f_real), label)
+            loss_G_total = loss_G_sup + lambda_adv * loss_G_adv
+            loss_G_total.backward()
+            optimizer_G.step()
+
+            total_loss_C += loss_C.item()
+            total_loss_G += loss_G_total.item()
+
+        print(
+            f"Epoch {epoch+1}/{num_epochs} | Loss_C: {total_loss_C/len(dataloader):.4f} | Loss_G: {total_loss_G/len(dataloader):.4f}"
+        )
 
 
 if __name__ == "__main__":
-    main()
+    # 请设置数据所在目录及数据集前缀（例如：如果文件为 DS_A.txt, 则 ds_prefix 为 "DS"）
+    data_directory = "./SW-620"  # 数据文件所在的文件夹
+    ds_prefix = "SW-620"  # 数据集前缀
+    train(data_directory, ds_prefix, num_epochs=50)
