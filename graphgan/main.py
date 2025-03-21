@@ -1,6 +1,6 @@
 import argparse
 from train import train
-from generate import generate_graphs
+from generate import generate_and_save
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="GraphGAN: Train or Generate")
@@ -19,7 +19,7 @@ if __name__ == "__main__":
         "--folder_path", type=str, default="./SW-620", help="数据文件所在目录"
     )
     parser.add_argument("--ds_prefix", type=str, default="SW-620", help="数据集前缀")
-    parser.add_argument("--epochs", type=int, default=100, help="训练周期数")
+    parser.add_argument("--epochs", type=int, default=50, help="训练周期数")
     parser.add_argument("--batch_size", type=int, default=32, help="批量大小")
     parser.add_argument("--latent_dim", type=int, default=64, help="潜在向量维度")
     parser.add_argument("--lr", type=float, default=0.001, help="学习率")
@@ -43,4 +43,4 @@ if __name__ == "__main__":
     if args.mode == "train":
         train(args)
     elif args.mode == "generate":
-        generate_graphs(args)
+        generate_and_save(args)

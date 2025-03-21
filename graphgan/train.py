@@ -4,6 +4,7 @@ import torch.nn.functional as F
 from torch_geometric.loader import DataLoader
 from torch_geometric.data import Batch
 from tqdm import tqdm
+import matplotlib.pyplot as plt
 
 from data_utils import (
     load_adjacency_matrix,
@@ -79,7 +80,7 @@ def train(args):
     generator = Generator(latent_dim=args.latent_dim, max_nodes=max_nodes).to(device)
     discriminator = Discriminator().to(device)
     g_optimizer = torch.optim.Adam(generator.parameters(), lr=args.lr)
-    d_optimizer = torch.optim.Adam(discriminator.parameters(), lr=args.lr)
+    d_optimizer = torch.optim.Adam(discriminator.parameters(), lr=args.lr / 2)  # 0.0005
 
     # 检查点路径与加载
     checkpoint_path = args.checkpoint_path
@@ -97,6 +98,10 @@ def train(args):
     else:
         print("No checkpoint found, starting training from scratch.")
 
+    # 训练循环前添加列表用于记录每个 epoch 的损失
+    epoch_d_losses = []
+    epoch_g_losses = []
+
     # 训练循环
     for epoch in tqdm(range(start_epoch, args.epochs), desc="Training epochs"):
         epoch_d_loss = 0.0
@@ -109,8 +114,10 @@ def train(args):
 
             # 训练判别器
             d_optimizer.zero_grad()
+            # 在计算真实数据损失时，将标签平滑到0.9
             real_loss = F.binary_cross_entropy(
-                discriminator(real_data), torch.ones(batch_size, 1, device=device)
+                discriminator(real_data),
+                torch.full((batch_size, 1), 0.9, device=device)
             )
 
             z = torch.randn(batch_size, args.latent_dim, device=device)
@@ -147,6 +154,10 @@ def train(args):
             f"Epoch [{epoch+1}/{args.epochs}] | D Loss: {avg_d_loss:.4f} | G Loss: {avg_g_loss:.4f}"
         )
 
+        # 记录每个 epoch 的损失
+        epoch_d_losses.append(avg_d_loss)
+        epoch_g_losses.append(avg_g_loss)
+
         # 保存检查点
         torch.save(
             {
@@ -155,10 +166,24 @@ def train(args):
                 "discriminator_state_dict": discriminator.state_dict(),
                 "g_optimizer_state_dict": g_optimizer.state_dict(),
                 "d_optimizer_state_dict": d_optimizer.state_dict(),
+                "max_nodes": max_nodes,   # 保存 max_nodes
             },
             checkpoint_path,
         )
         tqdm.write(f"Checkpoint saved to {checkpoint_path}")
+
+    # 绘制并保存损失图像
+    plt.figure()
+    epochs_range = range(start_epoch+1, args.epochs+1)
+    plt.plot(epochs_range, epoch_d_losses, label="Discriminator Loss")
+    plt.plot(epochs_range, epoch_g_losses, label="Generator Loss")
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.title("Training Losses")
+    plt.legend()
+    plt.savefig("training_losses.png")
+    plt.close()
+    print("Training loss graph saved as training_losses.png")
 
     print("Training completed.")
     return generator, discriminator
