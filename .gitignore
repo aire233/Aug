@@ -2,3 +2,4 @@ myenv
 .ipynb_checkpoints
 venv
 __pycache__
+mygitconfig
