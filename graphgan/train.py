@@ -93,7 +93,7 @@ def train(args):
             d_optimizer.zero_grad()
             real_loss = F.binary_cross_entropy(
                 discriminator(real_data),
-                torch.full((batch_size, 1), 0.9, device=device) # 平滑标签
+                torch.full((batch_size, 1), 0.85, device=device) # 平滑标签
             )
 
             z = torch.randn(batch_size, args.latent_dim, device=device)
